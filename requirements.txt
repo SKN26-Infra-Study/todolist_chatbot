@@ -1,0 +1,15 @@
+langchain
+langchain-community
+langchain-ollama
+
+faiss-cpu
+sentence-transformers
+transformers
+torch
+
+pypdf
+python-dotenv
+tqdm
+
+pytest
+ipykernel
