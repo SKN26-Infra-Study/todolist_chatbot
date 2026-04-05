@@ -6,6 +6,18 @@
 - **LLM**은 `intent` 분류와 `slot` 채우기만 수행하며, **DB/상태 변경은 하지 않는다**.
 - **실제 CRUD**는 **Service → Repository** 경로로만 수행한다.
 - **discord.py**, **Cog** 기반, **Supabase(Postgres)**, 관계형 2테이블(`rooms`, `todos`), 벡터 DB 없음.
+- **LLM 구현:** OpenAI Chat Completions(예: `gpt-4o-mini`), 호출은 `LLMInterpreter` 한 경로에서 수행한다.
+
+### 1.1 필수 설계 원칙
+
+1. 사용자에게 `!add` 같은 **명령어를 강제하지 않는다**. 일반 채팅과 같은 자연어 입력만 받는다.
+2. 내부적으로 intent는 **`add` / `list` / `complete` / `remove` / `unknown`** 중 하나로만 정규화한다.
+3. 슬롯 예: **`task_text`**, **`task_id`**, **`task_keyword`**, **`due_date`** — 채울 수 없으면 `null`.
+4. 정보가 충분하면 **바로 실행**(DialogueManager → Service).
+5. 부족하거나 모호하면 **`needs_clarification: true`** 와 한국어 **`clarification_question`** 으로만 응답(실행은 하지 않음).
+6. **`complete`**, **`remove`** 는 **고위험**: 대상이 하나로 확정되지 않으면 **절대 실행하지 않고** 확인 질문만 한다.
+7. **실제 DB·상태 변경은 반드시 Service 레이어**(`TodoService`, `RoomService`)를 통해서만 수행한다. LLM·Interpreter는 DB에 접근하지 않는다.
+8. 확장 시 메타데이터만 **`jsonb`** 컬럼(예: `todos.metadata`)으로 보관할 수 있으나, **핵심 도메인은 관계형 컬럼**으로 유지한다.
 
 ---
 
@@ -267,47 +279,99 @@ todolist_chatbot/
 
 ---
 
-## 8. LLM 프롬프트 설계 초안 (JSON 출력)
+## 8. LLM 프롬프트 설계 (JSON intent / slots)
 
-**시스템 역할 요지**
+### 8.1 역할 분리
 
-- 너는 Discord Todo 봇의 **의도 분석기**다.  
-- **데이터베이스를 수정하지 않는다.** 출력은 **JSON 한 개**만.  
-- intent는 반드시 다음 중 하나: `add`, `list`, `complete`, `remove`, `unknown`.  
-- 슬롯: `task_text`, `task_id`, `task_keyword`, `due_date`(ISO 8601 날짜 문자열 또는 null), 부족하면 null.  
-- `needs_clarification`: true면 `clarification_question`에 한국어 질문 한 문장.  
-- `risky_action`: intent가 `remove` 또는 `complete`이면 true.  
-- 후보 task 목록이 컨텍스트로 주어지면, `task_id`는 그 목록의 id만 사용한다.
+- **시스템 메시지:** 규칙·스키마·금지 사항(고정 문자열, 버전 관리 권장).  
+- **유저 메시지:** 실제 발화 + 애플리케이션이 붙인 **[컨텍스트]** 블록(후보 todo 목록, 마지막 생성 id 등).  
+- 앱 코드는 응답 문자열에서 **JSON만 파싱**(앞뒤 공백 제거, 필요 시 `response_format: json_object` 사용).
 
-**출력 스키마 예시**
+### 8.2 출력 JSON 스키마 (파싱용 키 고정)
 
-```json
-{
-  "intent": "add",
-  "slots": {
-    "task_text": "string|null",
-    "task_id": "integer|null",
-    "task_keyword": "string|null",
-    "due_date": "string|null"
-  },
-  "needs_clarification": false,
-  "clarification_question": "string|null",
-  "confidence": 0.0,
-  "risky_action": false,
-  "rationale_ko": "한 줄 요약(디버그용, 선택)"
-}
+| 필드 | 타입 | 설명 |
+|------|------|------|
+| `intent` | string | `add` \| `list` \| `complete` \| `remove` \| `unknown` |
+| `slots.task_text` | string \| null | 추가할 할 일 문구 |
+| `slots.task_id` | number \| null | DB PK; **컨텍스트 후보에 있는 id만** |
+| `slots.task_keyword` | string \| null | 검색·삭제·완료 시 키워드 |
+| `slots.due_date` | string \| null | ISO 8601 날짜(예: `2026-04-10`), 불명확 시 null |
+| `needs_clarification` | boolean | true면 아래 질문만 하고 실행은 앱에서 하지 않음 |
+| `clarification_question` | string \| null | 한국어 존댓말 한 문장 |
+| `confidence` | number | 0~1 |
+| `risky_action` | boolean | `complete` 또는 `remove` 이면 true |
+| `rationale_ko` | string \| null | 디버그용 한 줄(선택) |
+
+### 8.3 시스템 프롬프트 전문 (복사용)
+
+아래 블록을 `LLMInterpreter`의 **system** 역할에 그대로 넣는다.
+
+```text
+당신은 Discord 할 일(Todo) 봇의 "의도 분석기"입니다. 사용자의 한국어(또는 혼용) 발화를 읽고, 아래 스키마에 맞는 JSON 하나만 출력합니다.
+
+[절대 준수]
+- 데이터베이스·파일·네트워크에 접근하지 않습니다. 오직 사용자 메시지와 같은 턴에 제공된 [컨텍스트] 블록만 사실로 사용합니다.
+- 할 일을 실제로 추가·삭제·완료 처리하지 않습니다. 분석 결과만 냅니다.
+- 출력은 JSON 객체 한 개뿐입니다. 앞뒤에 설명 문장, 마크다운, 코드 펜스(삼중 백틱)를 붙이지 마세요.
+
+[intent]
+다음 문자열 중 정확히 하나만 사용: "add", "list", "complete", "remove", "unknown"
+- add: 새 할 일을 넣으려는 경우
+- list: 목록 조회·보여달라는 경우
+- complete: 어떤 항목을 끝냈다·체크한다는 경우
+- remove: 항목 삭제·지운다는 경우
+- unknown: 위에 해당하지 않거나 할 일 봇 범위 밖인 경우
+
+[slots]
+모든 키를 항상 포함합니다. 알 수 없거나 해당 없으면 null.
+- task_text: 새로 추가할 할 일 내용(add에서 주로 사용)
+- task_id: 숫자. 오직 [컨텍스트]에 나열된 후보 할 일의 id 중에서만 선택. 후보가 없거나 단정할 수 없으면 null
+- task_keyword: 어떤 항목인지 찾기 위한 짧은 키워드·구문(삭제·완료·목록 필터에 활용 가능)
+- due_date: ISO 8601 형식의 날짜 문자열(예: 2026-04-10). 상대 표현(내일 등)은 [컨텍스트]에 오늘 날짜가 주어지면 그에 맞게 해석해 채울 수 있음. 불가하면 null
+
+[clarification]
+- 정보가 부족하거나, 같은 키워드에 여러 항목이 걸릴 수 있으면 needs_clarification을 true로 하고, clarification_question에 한국어 존댓말로 한 문장만 작성합니다.
+- intent가 "complete" 또는 "remove"이면 위험한 액션입니다. task_id가 후보 목록 기준으로 단 하나로 확정되지 않으면 반드시 needs_clarification: true로 하고 task_id는 null로 둡니다. 추측으로 id를 만들지 마세요.
+
+[기타]
+- confidence: 0에서 1 사이 실수로, 해석 확신도를 나타냅니다.
+- risky_action: intent가 "complete" 또는 "remove"이면 true, 아니면 false
+- rationale_ko: 디버그용 한 줄 요약(한국어). 불필요하면 null
+
+[출력 예시 형태 — 키 이름·중첩 구조를 반드시 지킬 것]
+{"intent":"list","slots":{"task_text":null,"task_id":null,"task_keyword":null,"due_date":null},"needs_clarification":false,"clarification_question":null,"confidence":0.9,"risky_action":false,"rationale_ko":null}
 ```
 
-**사용자 메시지 구성 예시**
+### 8.4 유저 메시지 템플릿 (앱에서 조립)
+
+`{{...}}` 는 런타임 치환 placeholder이다. 없는 항목은 빈 줄 또는 `없음`으로 둔다.
 
 ```text
 [현재 사용자 발화]
-{user_message}
+{{user_message}}
 
-[컨텍스트]
-- guild_id, channel_id, user_id (참고만, DB 조회 금지)
-- 최근 대화 요약 또는 마지막에 추가된 todo_id, 미완료 목록 상위 N개 (있다면)
+[컨텍스트 — 참고 전용, 당신은 DB에 접근할 수 없음]
+- 오늘 날짜(서버 기준): {{today_iso}}
+- guild_id: {{guild_id}}
+- channel_id (discord_room_id): {{channel_id}}
+- user_id (discord_user_id): {{user_id}}
+- 직전 턴에 이 사용자가 추가한 todo_id (있으면): {{last_created_todo_id}}
+- 현재 방(room) 기준 미완료 할 일 후보 (최대 {{max_todos}}개, 형식: "id: 제목"):
+{{open_todos_lines}}
 ```
+
+`open_todos_lines` 예:
+
+```text
+- 12: 일일 회의
+- 15: 팀 회의 준비
+```
+
+### 8.5 OpenAI(gpt-4o-mini) 연동 팁
+
+- 가능하면 `response_format: { "type": "json_object" }` 를 켜고, 시스템 프롬프트에 **“응답은 JSON 객체여야 한다”** 를 명시한다.  
+- 파싱 실패 시 1회 재시도(동일 system + “방금 출력이 JSON이 아니었습니다. 스키마에 맞는 JSON만 다시 출력하세요”) 정도만 권장한다.  
+- **`DialogueManager`** 가 `risky_action`·`needs_clarification`·후보 개수를 **최종 판단**에 함께 쓰는 것이 안전하다(LLM만 믿지 않음).
 
 ---
 
