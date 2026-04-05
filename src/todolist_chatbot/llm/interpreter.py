@@ -44,23 +44,33 @@ class LLMInterpreter:
         top_p: float = 1.0,
         max_tokens: int = 1024,
         stream: bool = False,
+        json_response: bool = False,
     ) -> str:
         """대화 완성 한 번 호출 — DialogueManager가 system/user 메시지를 조합해 넘긴다."""
-        completion = self._client.chat.completions.create(
-            model=self._model,
-            messages=messages,
-            temperature=temperature,
-            top_p=top_p,
-            max_tokens=max_tokens,
-            stream=stream,
-        )
+        create_kw: dict[str, Any] = {
+            "model": self._model,
+            "messages": messages,
+            "temperature": temperature,
+            "top_p": top_p,
+            "max_tokens": max_tokens,
+            "stream": stream,
+        }
+        if json_response:
+            create_kw["response_format"] = {"type": "json_object"}
+        completion = self._client.chat.completions.create(**create_kw)
         choice = completion.choices[0].message
         return (choice.content or "").strip()
 
-    def interpret_raw(self, user_text: str, system_prompt: str) -> str:
-        """intent/slot JSON용 — 구현 시 system_prompt에 스키마를 넣는다."""
-        messages: list[dict[str, Any]] = [
+    def interpret_raw(
+        self,
+        user_text: str,
+        system_prompt: str,
+        *,
+        json_response: bool = True,
+    ) -> str:
+        """intent/slot JSON용 — system_prompt가 JSON만 내도록 맞추고 json_response=True 권장."""
+        messages: list[dict[str, str]] = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_text},
         ]
-        return self.chat(messages)
+        return self.chat(messages, json_response=json_response)

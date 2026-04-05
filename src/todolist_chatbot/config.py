@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 from dotenv import load_dotenv
 
+# 패키지 위치 기준으로 프로젝트 루트의 .env 를 찾는다 (실행 cwd와 무관하게)
+_ROOT = Path(__file__).resolve().parents[2]
+load_dotenv(_ROOT / ".env")
 load_dotenv()
 
 # --- OpenAI Chat Completions (intent / slot JSON) ---

@@ -10,3 +10,5 @@ Python · discord.py · Supabase(Postgres). 자연어 intent/slot은 **OpenAI Ch
 - **레거시 RAG:** `legacy/rag_stack/`
 
 `PYTHONPATH`에 프로젝트 루트와 `src`를 함께 넣는다 (`app.main` + `todolist_chatbot`).
+
+**LLM 스모크 테스트:** 프로젝트 루트에서 `python scripts/test_openai.py` (자세한 옵션은 스크립트 상단 주석).
